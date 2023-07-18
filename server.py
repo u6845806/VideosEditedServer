@@ -1,21 +1,43 @@
 # main.py
 import os
 import uuid
-from fastapi import FastAPI, HTTPException, File, UploadFile
+from fastapi import FastAPI, HTTPException, File, UploadFile, Depends, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime
-from celery import Celery
+from passlib.context import CryptContext
+from sqlalchemy import create_engine, Column, String, Integer, DateTime
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+from databases import Database
 
 app = FastAPI()
 
-# 配置数据库和Celery
-# 这里使用SQLite作为示例数据库，实际使用时可以替换为其他数据库
-# 此处省略数据库相关的代码
+# 配置数据库
+DATABASE_URL = "sqlite:///./video_clip.db"
+database = Database(DATABASE_URL)
+metadata = declarative_base()
 
-# 创建Celery实例
-celery = Celery('tasks', broker='redis://localhost:6379/0')
+# 创建密码哈希上下文
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+# 创建Celery实例（省略之前的代码）
+
+# 定义数据库模型
+class ClipRequestModel(metadata):
+    __tablename__ = "clip_requests"
+
+    id = Column(Integer, primary_key=True, index=True)
+    request_id = Column(String, unique=True, index=True)
+    video_url = Column(String)
+    start_time = Column(String)
+    end_time = Column(String)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+# 创建数据库表
+engine = create_engine(DATABASE_URL)
+metadata.create_all(bind=engine)
 
 # 定义剪辑请求数据模型
 class VideoClipRequest(BaseModel):
@@ -30,29 +52,46 @@ class ClipTaskStatus(BaseModel):
     progress: Optional[int] = None
     result_url: Optional[str] = None
 
-# 异步剪辑任务
-@celery.task(bind=True)
-def clip_video_task(self, request_id: str):
-    # 此处进行剪辑处理，调用ffmpeg等库对视频进行剪辑
-    # 剪辑完成后保存剪辑后的视频，并将结果URL存储在数据库中
-    # 此处省略剪辑处理相关的代码
+# 定义用户模型
+class User(BaseModel):
+    username: str
+    password: str
 
-    # 示例中将剪辑结果文件保存在本地，实际应该使用云存储或其他方式保存
-    result_url = f'/path/to/clipped_videos/{request_id}.mp4'
+# 定义用户身份验证函数
+def authenticate_user(username: str, password: str):
+    # 从数据库中查询用户信息
+    # 此处省略数据库查询相关的代码
 
-    # 更新数据库中的剪辑结果URL和状态
-    # 此处省略数据库更新相关的代码
+    # 示例中使用硬编码的密码，实际应从数据库中获取并进行密码验证
+    hashed_password = "$2b$12$CvKnOnMv48C/YhMRpbUGeO63K.RByu1UnlQsHv6oRTfGdBM5ou3fG"
 
-    return result_url
+    if pwd_context.verify(password, hashed_password):
+        return True
+    return False
+
+# 用户身份验证依赖
+def get_current_user(username: str = Depends(str), password: str = Depends(str)):
+    if not authenticate_user(username, password):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+    return username
+
+# 异步剪辑任务（省略之前的代码）
 
 # 提交视频剪辑请求
 @app.post("/api/clip-video/")
-def clip_video(request: VideoClipRequest):
+async def clip_video(request: VideoClipRequest):
     # 生成唯一的请求ID
     request_id = str(uuid.uuid4())
 
     # 此处将剪辑请求数据保存到数据库中，包括request_id、video_url、start_time、end_time等字段
-    # 此处省略数据库保存相关的代码
+    async with database.transaction():
+        query = ClipRequestModel.insert().values(
+            request_id=request_id,
+            video_url=request.video_url,
+            start_time=request.start_time,
+            end_time=request.end_time,
+        )
+        await database.execute(query)
 
     # 调用Celery进行异步剪辑任务
     clip_video_task.apply_async(args=[request_id])
@@ -61,9 +100,13 @@ def clip_video(request: VideoClipRequest):
 
 # 获取剪辑任务进度
 @app.get("/api/clip-progress/{request_id}")
-def clip_progress(request_id: str):
+async def clip_progress(request_id: str):
     # 根据请求ID从数据库中查询剪辑任务状态和进度
-    # 此处省略数据库查询相关的代码
+    query = ClipRequestModel.select().where(ClipRequestModel.request_id == request_id)
+    result = await database.fetch_one(query)
+
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Request not found")
 
     # 示例中返回模拟的剪辑任务进度
     progress = 50  # 假设剪辑进度为50%
@@ -72,9 +115,13 @@ def clip_progress(request_id: str):
 
 # 获取剪辑后视频URL
 @app.get("/api/get-clipped-video/{request_id}")
-def get_clipped_video(request_id: str):
+async def get_clipped_video(request_id: str):
     # 根据请求ID从数据库中查询剪辑任务状态和结果URL
-    # 此处省略数据库查询相关的代码
+    query = ClipRequestModel.select().where(ClipRequestModel.request_id == request_id)
+    result = await database.fetch_one(query)
+
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Request not found")
 
     # 示例中返回模拟的剪辑结果URL
     result_url = f'/path/to/clipped_videos/{request_id}.mp4'
